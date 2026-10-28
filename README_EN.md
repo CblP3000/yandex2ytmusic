@@ -4,7 +4,7 @@
 
 Transfer liked tracks, playlists and podcasts from Yandex.Music to YouTube Music.
 
-**Fork of [gosha20777/yandex2ytmusic](https://github.com/gosha20777/yandex2ytmusic) with improvements.**
+> Fork of [gosha20777/yandex2ytmusic](https://github.com/gosha20777/yandex2ytmusic). Many thanks to @kirillqa17
 
 > ⚠️ All changes in this version were made with AI assistance.
 
@@ -44,26 +44,54 @@ playwright install chromium
 python main.py
 ```
 
-An interactive menu will appear:
+An interactive menu will appear (navigate with ↑/↓ arrows, select by typing a number + Enter):
 
 ```
 === Yandex Music → YouTube Music ===
-
 What do you want to do?
-  1. Full transfer (export from Yandex + import to YouTube)
+> 1. Full transfer (export from Yandex + import to YouTube)
   2. Export from Yandex Music only
   3. Import to YouTube Music only (from file)
   4. Set up YouTube Music authorization
-
-Choice (1-4):
+  5. Exit
 ```
 
-When importing, you can choose the mode:
+## Menus and Controls
 
-```
-Import mode:
-  1. Fast (parallel, order not preserved)
-  2. Preserve order (slower)
+All screens use the same interactive menu system (`cli/menu.py`):
+
+| Menu | Where | Items |
+|-------|-----|--------|
+| Main | `main()` | Full transfer / export / import / authorization / exit |
+| What to export | `export_from_yandex()` | Liked tracks / podcasts / your playlists / liked playlists |
+| Your playlists selection | `export_from_yandex()` | Specific playlists (multi-select) |
+| Liked playlists selection | `export_from_yandex()` | Specific playlists (multi-select) |
+| Import mode | `import_to_youtube()` | Fast / preserve order |
+| Authorization method | `setup_youtube_auth()` | Automatic / manual |
+
+Common hotkeys:
+
+| Key | Action |
+|----------|----------|
+| ↑ / ↓ | Move cursor |
+| Home / End | First / last item |
+| Numbers + Enter | Select by number (you can type any number, e.g. `12` + Enter) |
+| Esc | Clear typed number or cancel selection |
+| q / Ctrl+C | Exit |
+
+Multi-select (`MultiSelectMenu`) additionally supports:
+
+| Key | Action |
+|----------|----------|
+| Space | Toggle item under cursor |
+| Numbers + Enter | Toggle item by number |
+| a | Select all |
+| n | Deselect all |
+
+Demo of both screens:
+
+```bash
+python -m cli.demo
 ```
 
 ## Detailed Instructions
@@ -76,15 +104,17 @@ Import mode:
 
 Or follow the [yandex-music documentation](https://yandex-music.readthedocs.io/en/main/token.html).
 
-### Step 2: Export Tracks and podcasts from Yandex Music
+### Step 2: Export from Yandex Music
 
 ```bash
 python main.py
 # Choose: 2. Export from Yandex Music only
 # Enter token
+# Choose what to export (multi-select)
+# If playlists are selected — mark specific ones from the list
 ```
 
-Tracks, playlists and podcasts will be saved to `tracks.json`. Multithreaded processing speeds up the process ~5x.
+On the first screen, mark what to export: liked tracks, podcasts, your playlists, liked playlists. If playlists are selected, a list of specific playlists will appear (separately for yours and liked ones). The selected data is saved to `tracks.json` (the file is fully overwritten). Multithreaded processing speeds up the process ~5x.
 
 ### Step 3: Set Up YouTube Music Authorization
 
@@ -115,7 +145,7 @@ The program will automatically capture the required headers and create `browser.
    - **Chrome**: right-click → Copy → Copy request headers
 8. Paste in terminal and press **Ctrl+D**
 
-### Step 4: Import Tracks and Podcasts to YouTube Music
+### Step 4: Import to YouTube Music
 
 ```bash
 python main.py
@@ -123,7 +153,7 @@ python main.py
 # Choose mode: 1 (fast) or 2 (preserve order)
 ```
 
-The program will load, playlists and podcasts from `tracks.json` and add them to your YouTube Music likes.
+The program will load tracks, playlists and podcasts from `tracks.json` and add them to your YouTube Music likes.
 
 ## Import Modes
 
@@ -176,7 +206,7 @@ This solves the YouTube session timeout problem during long Yandex exports.
   "errors": []
 }
 ```
-- `playlists` — all playlists from Yanddex Music
+- `playlists` — all playlists from Yandex Music
 - `liked_podcasts` — all podcasts from Yandex Music
 - `liked_tracks` — all tracks from Yandex Music
 - `not_found` — tracks not found on YouTube Music
@@ -196,6 +226,23 @@ Use Browser authentication instead of OAuth. It's more stable.
 
 - Make sure Playwright is installed: `pip install playwright && playwright install chromium`
 - Try the manual method (option 2)
+
+### Debug Logs
+
+By default, only errors and warnings are printed to the console. To enable detailed diagnostic logs:
+
+```bash
+DEBUG=1 python main.py
+```
+
+With `DEBUG=1` lines prefixed with `[DEBUG]`/`[INFO]` appear:
+- YouTube API HTTP requests: method, URL, status, body type (json/html/empty) and the first 300 characters of the response
+- Authorization file details: age, which headers are present (without secret values)
+- Browser authorization: page URL while waiting, number of captured requests, launch/goto errors
+- Authorization check before import (verify_auth): success or not
+- Key presses in menus
+
+Secret values (`cookie`, `authorization`) are never logged in full.
 
 ## Dependencies
 

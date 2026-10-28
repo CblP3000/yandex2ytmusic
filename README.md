@@ -1,5 +1,7 @@
 # yandex2ytmusic
 
+**[English](README_EN.md)**
+
 Перенос понравившихся треков, плейлистов и подкастов из Yandex.Музыка в YouTube Music.
 
 > Форк [gosha20777/yandex2ytmusic](https://github.com/gosha20777/yandex2ytmusic). Большое спасибо @kirillqa17
