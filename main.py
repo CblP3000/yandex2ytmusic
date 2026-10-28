@@ -46,6 +46,7 @@ def export_from_yandex(out_path: str) -> None:
     menu.add("Подкасты", payload="podcasts")
     menu.add("Твои плейлисты", payload="my_playlists")
     menu.add("Лайкнутые плейлисты", payload="liked_playlists")
+    menu.add("Инвертировать порядок треков в плейлистах", payload="reverse_playlist_tracks")
 
     selected = menu.run()
     if not selected:
@@ -78,6 +79,10 @@ def export_from_yandex(out_path: str) -> None:
         print(f'Экспорт {len(playlists)} плейлистов из Яндекс Музыки...')
         playlists = importer.export_playlists(playlists)
         playlists.reverse()
+
+    if "reverse_playlist_tracks" in kinds:
+        for playlist in playlists:
+            playlist.tracks.reverse()
 
     if not tracks and not podcasts and not playlists:
         print("Экспорт отменён — ничего не выбрано")
