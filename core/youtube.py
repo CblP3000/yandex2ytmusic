@@ -2,9 +2,7 @@ import os
 import json
 import re
 import time
-import unicodedata
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from difflib import SequenceMatcher
 
 import requests
 from requests.sessions import Session
@@ -101,19 +99,6 @@ def sanitize_browser_headers(data: dict) -> dict:
     return clean
 
 
-def _normalize(text: str) -> str:
-    text = unicodedata.normalize('NFKD', text.casefold().replace('ø', 'o'))
-    text = ''.join(c for c in text if not unicodedata.combining(c))
-    return ' '.join(re.sub(r'[^\w]+', ' ', text).split())
-
-
-def _similarity(a: str, b: str) -> float:
-    a, b = _normalize(a), _normalize(b)
-    if a and b and (f' {a} ' in f' {b} ' or f' {b} ' in f' {a} '):
-        return max(SequenceMatcher(None, a, b).ratio(), 0.9)  # "USS" vs "USS (Ubiquitous Synergy Seeker)"
-    return SequenceMatcher(None, a, b).ratio()
-
-
 class YoutubeImporter:
     def __init__(self, token_path: str, client_secrets_path: str = None):
         """
@@ -172,6 +157,12 @@ class YoutubeImporter:
                     logger.warning(
                         "authorization не начинается с SAPISIDHASH (%d chars, starts=%r) — "
                         "сессия может быть невалидной.", len(auth_value), auth_value[:12],
+                    )
+                if age_hours > 0.5:
+                    logger.warning(
+                        "browser credentials aged %.1f h — сессии YouTube быстро истекают, "
+                        "при ошибке «Sign in» пересними заголовки непосредственно перед импортом.",
+                        age_hours,
                     )
             else:
                 self.auth_type = 'oauth'
@@ -278,13 +269,10 @@ class YoutubeImporter:
         except Exception as e:
             return (idx, track, None, str(e))
 
-        if not results:
+        if not results or not results[0].get('videoId'):
             return (idx, track, None, 'not_found')
 
-        result = self._get_best_result(results, track)
-        if result is None:
-            return (idx, track, None, 'not_found')
-        return (idx, track, result['videoId'], None)
+        return (idx, track, results[0]['videoId'], None)
     
     def _search_podcast(self, podcast: Podcast, idx: int) -> Tuple[int, Podcast, Optional[str], Optional[str]]:
         """
@@ -577,21 +565,6 @@ class YoutubeImporter:
                     pbar.write(f'Playlist creation error: {playlist.title}: {e}')
                 pbar.update(1)
         return errors
-
-    def _get_best_result(self, results: List[dict], track: Track) -> Optional[dict]:
-        """Return the result closest to the track by artist and title, or None if none matches both."""
-        best, best_score = None, 0.0
-        for result in results:
-            if not result.get('videoId'):
-                continue
-            artist = max((_similarity(track.artist, a['name']) for a in result.get('artists') or []), default=0.0)
-            title = result.get('title', '')
-            # "Title (feat. X)" still matches "Title", but ranks below an exact title
-            title_score = max(_similarity(track.name, title),
-                              0.9 * _similarity(track.name, re.sub(r'\s*[(\[].*?[)\]]', '', title)))
-            if artist >= 0.85 and title_score >= 0.8 and artist + title_score > best_score:
-                best, best_score = result, artist + title_score
-        return best
 
 
 # Алиас для обратной совместимости

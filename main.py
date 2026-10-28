@@ -97,7 +97,12 @@ def export_from_yandex(out_path: str) -> None:
     print(f'Экспортировано {len(tracks)} треков, {len(podcasts)} подкастов и {len(playlists)} плейлистов в {out_path}')
 
 
-def import_to_youtube(in_path: str, youtube_creds: str) -> None:
+def resolve_creds(browser_creds: str = "browser.json", oauth_creds: str = "oauth.json") -> str:
+    """Если настроен OAuth — используем его (токен живёт дольше и не зависит от IP)."""
+    return oauth_creds if os.path.exists(oauth_creds) else browser_creds
+
+
+def import_to_youtube(in_path: str, youtube_creds: str, client_secrets_path: str = None) -> None:
     """Import tracks from JSON file to YouTube Music."""
     if not os.path.exists(in_path):
         print(f"Ошибка: файл {in_path} не найден. Сначала выполни экспорт из Яндекс Музыки.")
@@ -129,19 +134,19 @@ def import_to_youtube(in_path: str, youtube_creds: str) -> None:
     menu = Menu("Режим импорта")
     menu.add(
         "Быстрый (параллельный, порядок не сохраняется)",
-        lambda: _run_import(data, tracks, podcasts, playlists, in_path, youtube_creds, keep_order=False),
+        lambda: _run_import(data, tracks, podcasts, playlists, in_path, youtube_creds, client_secrets_path, keep_order=False),
     )
     menu.add(
         "С сохранением порядка (медленнее)",
-        lambda: _run_import(data, tracks, podcasts, playlists, in_path, youtube_creds, keep_order=True),
+        lambda: _run_import(data, tracks, podcasts, playlists, in_path, youtube_creds, client_secrets_path, keep_order=True),
     )
     menu.run()
 
 
-def _run_import(data, tracks, podcasts, playlists, in_path, youtube_creds, keep_order: bool) -> None:
+def _run_import(data, tracks, podcasts, playlists, in_path, youtube_creds, client_secrets_path, keep_order: bool) -> None:
     logger.info("_run_import: keep_order=%s", keep_order)
     try:
-        exporter = YoutubeImporter(youtube_creds)
+        exporter = YoutubeImporter(youtube_creds, client_secrets_path)
         exporter.verify_auth()
     except Exception as e:
         logger.error("YoutubeImporter init/verify failed: %s", e)
@@ -182,12 +187,30 @@ def _run_import(data, tracks, podcasts, playlists, in_path, youtube_creds, keep_
         json.dump(data, f, ensure_ascii=False, indent=2)
 
 
-def setup_youtube_auth(creds_path: str) -> None:
+def setup_youtube_auth(creds_path: str, client_secrets_path: str = None) -> None:
     """Setup YouTube Music authentication."""
     menu = Menu("Способ авторизации YouTube Music")
     menu.add("Автоматически через браузер (откроется окно)", lambda: auto_browser_auth(creds_path))
     menu.add("Вручную (вставить headers)", lambda: manual_browser_auth(creds_path))
+    menu.add("OAuth через Google (надёжно, рекомендуется)", lambda: oauth_auth("oauth.json", client_secrets_path))
     menu.run()
+
+
+def oauth_auth(oauth_creds: str, client_secrets_path: str) -> None:
+    """Настройка OAuth-авторизации (device flow): токен живёт долго и не зависит от IP."""
+    if not client_secrets_path or not os.path.exists(client_secrets_path):
+        print("Для OAuth нужен файл client_secrets.json от Google:")
+        print("  1. Открой https://console.cloud.google.com → APIs & Services → Credentials")
+        print("  2. Создать учётные данные → OAuth client ID → тип «Desktop app»")
+        print("  3. Скачай JSON и сохрани рядом с программой как client_secrets.json")
+        print("  4. Запусти снова и выбери пункт OAuth.")
+        return
+    try:
+        importer = YoutubeImporter(oauth_creds, client_secrets_path)
+        importer.verify_auth()
+        print(f"OAuth работает, токен сохранён в {oauth_creds}")
+    except Exception as e:
+        print(f"Ошибка OAuth: {e}")
 
 
 def auto_browser_auth(creds_path: str) -> None:
@@ -345,7 +368,7 @@ def manual_browser_auth(creds_path: str) -> None:
         print("\nОшибка: файл не создан")
 
 
-def full_transfer(tracks_path: str, youtube_creds: str) -> None:
+def full_transfer(tracks_path: str, youtube_creds: str, client_secrets_path: str = None) -> None:
     """Full transfer: export from Yandex and import to YouTube."""
     export_from_yandex(tracks_path)
 
@@ -354,21 +377,25 @@ def full_transfer(tracks_path: str, youtube_creds: str) -> None:
 
     if not os.path.exists(youtube_creds):
         print("\nТеперь настроим авторизацию YouTube Music...")
-        setup_youtube_auth(youtube_creds)
+        setup_youtube_auth(youtube_creds, client_secrets_path)
 
     if os.path.exists(youtube_creds):
-        import_to_youtube(tracks_path, youtube_creds)
+        import_to_youtube(tracks_path, youtube_creds, client_secrets_path)
 
 
 def main() -> None:
     tracks_path = "tracks.json"
     youtube_creds = "browser.json"
 
+    client_secrets_path = None
+    if os.path.exists("client_secrets.json"):
+        client_secrets_path = "client_secrets.json"
+
     menu = Menu("=== Yandex Music → YouTube Music ===", "Что хочешь сделать?")
-    menu.add("Полный перенос (экспорт из Яндекса + импорт в YouTube)", lambda: full_transfer(tracks_path, youtube_creds))
+    menu.add("Полный перенос (экспорт из Яндекса + импорт в YouTube)", lambda: full_transfer(tracks_path, youtube_creds, client_secrets_path))
     menu.add("Только экспорт из Яндекс Музыки", lambda: export_from_yandex(tracks_path))
-    menu.add("Только импорт в YouTube Music (из файла)", lambda: import_to_youtube(tracks_path, youtube_creds))
-    menu.add("Настроить авторизацию YouTube Music", lambda: setup_youtube_auth(youtube_creds))
+    menu.add("Только импорт в YouTube Music (из файла)", lambda: import_to_youtube(tracks_path, youtube_creds, client_secrets_path))
+    menu.add("Настроить авторизацию YouTube Music", lambda: setup_youtube_auth(youtube_creds, client_secrets_path))
     menu.add("Выход")
     menu.run()
 
