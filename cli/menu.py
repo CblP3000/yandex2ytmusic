@@ -159,12 +159,12 @@ class MultiSelectMenu(BaseMenu):
     """Меню множественного выбора: возвращает список выбранных MenuItem.
 
     `run()` возвращает `list[MenuItem]` при подтверждении и `None`
-    при отмене (Esc/q).
+    при отмене (Esc/q). Если на момент подтверждения ничего не отмечено,
+    автоматически выбирается пункт, на который указывает курсор.
     """
 
-    def __init__(self, title: str = "", subtitle: str = "", allow_none: bool = True):
+    def __init__(self, title: str = "", subtitle: str = ""):
         super().__init__(title, subtitle)
-        self.allow_none = allow_none
         self._checked: list[bool] = []
 
     def add(self, label: str, handler: Callable[[], None] | None = None, payload: Any = None) -> MenuItem:
@@ -187,9 +187,8 @@ class MultiSelectMenu(BaseMenu):
                 self._checked[self.selected] = not self._checked[self.selected]
             return "draw"
         if key is Key.ENTER:
-            if not self.allow_none and not any(self._checked):
-                self._flash = "Ничего не выбрано — отметь хотя бы один пункт"
-                return "draw"
+            if self.items and not any(self._checked):
+                self._checked[self.selected] = True
             return "confirm"
         if isinstance(key, CharKey) and key.kind is Key.CHAR:
             char = key.char.lower()
