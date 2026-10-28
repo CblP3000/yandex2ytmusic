@@ -21,6 +21,7 @@ from cli.ui import CharKey, Key, TerminalSession, read_key
 class MenuItem:
     label: str
     handler: Callable[[], None] | None = None
+    payload: Any = None
 
 
 class BaseMenu:
@@ -35,8 +36,8 @@ class BaseMenu:
         self._flash = ""
         self._height = 0
 
-    def add(self, label: str, handler: Callable[[], None] | None = None) -> MenuItem:
-        item = MenuItem(label=label, handler=handler)
+    def add(self, label: str, handler: Callable[[], None] | None = None, payload: Any = None) -> MenuItem:
+        item = MenuItem(label=label, handler=handler, payload=payload)
         self.items.append(item)
         return item
 
@@ -166,8 +167,8 @@ class MultiSelectMenu(BaseMenu):
         self.allow_none = allow_none
         self._checked: list[bool] = []
 
-    def add(self, label: str, handler: Callable[[], None] | None = None) -> MenuItem:
-        item = super().add(label, handler)
+    def add(self, label: str, handler: Callable[[], None] | None = None, payload: Any = None) -> MenuItem:
+        item = super().add(label, handler, payload)
         self._checked.append(False)
         return item
 

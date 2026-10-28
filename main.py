@@ -6,11 +6,30 @@ from core import YoutubeImporter
 from core.playlist import Playlist
 from core.podcast import Podcast
 from core.track import Track
-from cli.menu import Menu
+from cli.menu import Menu, MultiSelectMenu
+
+
+def choose_playlists(title: str, playlists: list) -> list:
+    """Показывает мультивыбор конкретных плейлистов.
+
+    Возвращает список выбранных плейлистов (пустой, если отменено).
+    """
+    if not playlists:
+        print("Плейлисты не найдены")
+        return []
+
+    menu = MultiSelectMenu(title)
+    for playlist in playlists:
+        menu.add(playlist.title, payload=playlist)
+
+    selected = menu.run()
+    if selected is None:
+        return []
+    return [item.payload for item in selected]
 
 
 def export_from_yandex(out_path: str) -> None:
-    """Export tracks from Yandex Music to JSON file."""
+    """Export chosen data from Yandex Music to JSON file."""
     token = input("Введи токен Yandex Music: ").strip()
     if not token:
         print("Ошибка: токен не указан")
@@ -18,17 +37,47 @@ def export_from_yandex(out_path: str) -> None:
 
     importer = YandexMusicExporter(token)
 
-    print('Экспорт лайкнутых треков из Яндекс Музыки...')
-    tracks = importer.export_liked_tracks()
-    tracks.reverse()
+    menu = MultiSelectMenu("Что экспортировать?")
+    menu.add("Треки из «Мне нравится»", payload="tracks")
+    menu.add("Подкасты", payload="podcasts")
+    menu.add("Твои плейлисты", payload="my_playlists")
+    menu.add("Лайкнутые плейлисты", payload="liked_playlists")
 
-    print('Экспорт лайкнутых подкастов из Яндекс Музыки...')
-    podcasts = importer.export_liked_podcasts()
-    podcasts.reverse()
+    selected = menu.run()
+    if not selected:
+        print("Экспорт отменён")
+        return
 
-    print('Экспорт лайкнутых плейлистов из Яндекс Музыки...')
-    playlists = importer.export_playlists()
-    playlists.reverse()
+    kinds = {item.payload for item in selected}
+
+    tracks = []
+    podcasts = []
+    playlists = []
+
+    if "tracks" in kinds:
+        print('Экспорт лайкнутых треков из Яндекс Музыки...')
+        tracks = importer.export_liked_tracks()
+        tracks.reverse()
+
+    if "podcasts" in kinds:
+        print('Экспорт лайкнутых подкастов из Яндекс Музыки...')
+        podcasts = importer.export_liked_podcasts()
+        podcasts.reverse()
+
+    if "my_playlists" in kinds:
+        playlists.extend(choose_playlists("Выбери свои плейлисты", importer.get_my_playlists()))
+
+    if "liked_playlists" in kinds:
+        playlists.extend(choose_playlists("Выбери лайкнутые плейлисты", importer.get_liked_playlists()))
+
+    if playlists:
+        print(f'Экспорт {len(playlists)} плейлистов из Яндекс Музыки...')
+        playlists = importer.export_playlists(playlists)
+        playlists.reverse()
+
+    if not tracks and not podcasts and not playlists:
+        print("Экспорт отменён — ничего не выбрано")
+        return
 
     data = {
         'playlists': [{'title': playlist.title, 'description': playlist.description, 'tracks': [{'artist': t.artist, 'name': t.name} for t in playlist.tracks]} for playlist in playlists],

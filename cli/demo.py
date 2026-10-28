@@ -8,7 +8,7 @@ from cli.menu import Menu, MultiSelectMenu
 
 def demo_single() -> None:
     print("\n=== Демо: одиночное меню (12 пунктов) ===\n")
-    menu = Menu("Одиночное меню", "Стрелки ↑/↓, цифры + Enter (например 12), Esc — назад")
+    menu = Menu("Одиночное меню")
     for i in range(1, 13):
         menu.add(f"Пункт {i}", handler=lambda i=i: print(f"\nВыбран пункт {i}"))
     menu.add("Завершить демо")
@@ -17,10 +17,7 @@ def demo_single() -> None:
 
 def demo_multi() -> None:
     print("\n=== Демо: мультивыбор ===\n")
-    menu = MultiSelectMenu(
-        "Мультивыбор",
-        "Space — отметить · цифры+Enter — по номеру · a/n — всё/ничего · Enter — готово",
-    )
+    menu = MultiSelectMenu("Мультивыбор")
     for i in range(1, 7):
         menu.add(f"Вариант {i}")
     selected = menu.run()

@@ -43,7 +43,7 @@ class YandexMusicExporter:
         name = podcast.title
         return Podcast(label, name)
     
-    def _process_playlist(self, playlist) -> Playlist:
+    def process_playlist(self, playlist) -> Playlist:
         """Process a single playlist and return Playlist object."""
         fetched_tracks = playlist.fetch_tracks()
         # TODO: Parallel implementation? Not sure if order is important for some users...
@@ -109,13 +109,21 @@ class YandexMusicExporter:
 
         return result
 
-    def export_playlists(self, max_workers: int = 5) -> List[Playlist]:
-        playlists = [like.playlist for like in self.client.users_likes_playlists()]
+    def get_my_playlists(self) -> List[Playlist]:
+        """Список своих плейлистов (без служебного «Мне нравится»)."""
+        playlists = self.client.users_playlists_list()
+        return [p for p in playlists if p.kind != -1]
 
+    def get_liked_playlists(self) -> List[Playlist]:
+        """Список лайкнутых плейлистов (метаданные, без треков)."""
+        return [like.playlist for like in self.client.users_likes_playlists()]
+
+    def export_playlists(self, playlists: List[Playlist], max_workers: int = 5) -> List[Playlist]:
+        """Экспорт конкретных плейлистов (метаданные + треки)."""
         result = []
         with tqdm(total=len(playlists), desc='Export playlists') as pbar:
             with ThreadPoolExecutor(max_workers=max_workers) as executor:
-                futures = {executor.submit(self._process_playlist, playlist): i
+                futures = {executor.submit(self.process_playlist, playlist): i
                           for i, playlist in enumerate(playlists)}
 
                 # Собираем результаты с сохранением порядка
@@ -135,5 +143,9 @@ class YandexMusicExporter:
                 for i in range(len(playlists)):
                     if results_dict.get(i):
                         result.append(results_dict[i])
-        
+
         return result
+
+    def export_liked_playlists(self, max_workers: int = 5) -> List[Playlist]:
+        """Экспорт всех лайкнутых плейлистов."""
+        return self.export_playlists(self.get_liked_playlists(), max_workers)
