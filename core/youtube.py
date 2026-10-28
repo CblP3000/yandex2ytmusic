@@ -8,25 +8,10 @@ from difflib import SequenceMatcher
 
 from tqdm import tqdm
 from ytmusicapi import YTMusic, setup_oauth
-from ytmusicapi.exceptions import YTMusicServerError, YTMusicUserError
-from requests.exceptions import RequestException
 from typing import List, Tuple, Optional
 from .track import Track
 from .podcast import Podcast
 from .playlist import Playlist
-
-
-class YoutubeAuthError(RuntimeError):
-    """Невалидная или устаревшая авторизация YouTube Music."""
-
-
-def _auth_error_hint(action: str = "выполнения запроса") -> YoutubeAuthError:
-    return YoutubeAuthError(
-        f"Ошибка авторизации YouTube Music при {action}: сессия истекла "
-        "или заголовки некорректны (сервер не вернул данные API). "
-        "Настрой авторизацию заново: главное меню → «Настроить авторизацию "
-        "YouTube Music» → вариант 1 (автоматически через браузер)."
-    )
 
 
 def _normalize(text: str) -> str:
@@ -63,22 +48,7 @@ class YoutubeImporter:
 
             if 'cookie' in data or 'Cookie' in data or 'x-origin' in data:
                 self.auth_type = 'browser'
-                keys = {k.lower(): v for k, v in data.items()}
-                if not keys.get('authorization') or not keys.get('cookie'):
-                    raise ValueError(
-                        "Файл авторизации не содержит обязательных браузерных заголовков "
-                        "(authorization и cookie). Скопируй ВСЕ Request Headers именно "
-                        "POST-запроса browse из DevTools (Network → browse → Request Headers), "
-                        "как описано в README."
-                    )
-                try:
-                    self.ytmusic = YTMusic(token_path)
-                except YTMusicUserError as e:
-                    raise ValueError(
-                        "Не удалось распознать файл авторизации как браузерный. "
-                        "Скопируй ВСЕ Request Headers именно POST-запроса browse из DevTools, "
-                        "включая authorization (SAPISIDHASH ...) и cookie."
-                    ) from e
+                self.ytmusic = YTMusic(token_path)
             else:
                 self.auth_type = 'oauth'
                 if not client_secrets_path or not os.path.exists(client_secrets_path):
@@ -114,21 +84,6 @@ class YoutubeImporter:
                 f.write(token)
 
         self.ytmusic = YTMusic(token_path, oauth_credentials=self.oauth_credentials)
-
-    def _get_liked_ids(self) -> set:
-        try:
-            return {s['videoId'] for s in self.ytmusic.get_liked_songs(limit=None)['tracks']}
-        except (json.JSONDecodeError, YTMusicServerError, RequestException) as e:
-            raise _auth_error_hint("повторной проверки лайков") from e
-
-    def verify_auth(self) -> None:
-        """Контрольный запрос: мгновенно обнаруживает невалидную авторизацию."""
-        try:
-            self.ytmusic.get_liked_songs(limit=1)
-        except YoutubeAuthError:
-            raise
-        except (json.JSONDecodeError, YTMusicServerError, RequestException) as e:
-            raise _auth_error_hint() from e
 
     def _search_track(self, track: Track, idx: int) -> Tuple[int, Track, Optional[str], Optional[str]]:
         """
@@ -250,8 +205,6 @@ class YoutubeImporter:
         not_found: List[Track] = []
         errors: List[Track] = []
 
-        self.verify_auth()
-
         # Этап 1: Параллельный поиск
         search_results = {}  # idx -> (track, videoId, error)
 
@@ -319,7 +272,7 @@ class YoutubeImporter:
 
         # YouTube sometimes drops likes without returning an error: retry the ones that didn't stick
         failed = set(errors)
-        liked_ids = self._get_liked_ids()
+        liked_ids = {s['videoId'] for s in self.ytmusic.get_liked_songs(limit=None)['tracks']}
         missing = [(track, video_id) for _, track, video_id in tracks_to_like
                    if video_id not in liked_ids and track not in failed]
         if missing:
@@ -327,7 +280,7 @@ class YoutubeImporter:
             for track, video_id in tqdm(missing, desc='Retry'):
                 self._like_track(track, video_id)
                 time.sleep(1)
-            liked_ids = self._get_liked_ids()
+            liked_ids = {s['videoId'] for s in self.ytmusic.get_liked_songs(limit=None)['tracks']}
             errors += [track for track, video_id in missing if video_id not in liked_ids]
 
         return not_found, errors
@@ -344,8 +297,6 @@ class YoutubeImporter:
         """
         not_found: List[Podcast] = []
         errors: List[Podcast] = []
-
-        self.verify_auth()
 
         # Этап 1: Параллельный поиск
         search_results = {}  # idx -> (podcast, videoId, error)
@@ -426,8 +377,6 @@ class YoutubeImporter:
             List[Playlist]: A list of Playlists that encountered errors during creation
         """
         errors: List[Playlist] = []
-
-        self.verify_auth()
 
         # Последовательное создание плейлистов
         # TODO: Подумать над параллелизацией

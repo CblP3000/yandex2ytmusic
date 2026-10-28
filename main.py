@@ -1,6 +1,5 @@
 import json
 import os
-import time
 
 from core import YandexMusicExporter
 from core import YoutubeImporter
@@ -179,66 +178,6 @@ def setup_youtube_auth(creds_path: str) -> None:
     menu.run()
 
 
-def _proxy_from_env() -> str | None:
-    """Подхватывает прокси из переменных окружения (Playwright их игнорирует)."""
-    for var in ("HTTPS_PROXY", "https_proxy", "HTTP_PROXY", "http_proxy", "ALL_PROXY", "all_proxy"):
-        value = os.environ.get(var)
-        if value:
-            if "://" not in value:
-                value = "http://" + value
-            return value
-    return None
-
-
-def _launch_browser(p):
-    """Запускает браузер, предпочитая реальный Chrome/Edge (труднее вычислить)."""
-    args = ["--disable-blink-features=AutomationControlled"]
-    launch_kwargs = dict(headless=False, args=args)
-    proxy = _proxy_from_env()
-    if proxy:
-        launch_kwargs["proxy"] = {"server": proxy}
-    for channel in ("chrome", "msedge"):
-        try:
-            return p.chromium.launch(channel=channel, **launch_kwargs)
-        except Exception:
-            continue
-    return p.chromium.launch(**launch_kwargs)
-
-
-STEALTH_JS = """
-Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
-window.chrome = window.chrome || {};
-window.chrome.runtime = { id: 'stealth', sendMessage: () => {}, onMessage: { addListener: () => {} } };
-window.chrome.loadTimes = () => ({});
-window.chrome.csi = () => ({});
-Object.defineProperty(navigator, 'languages', { get: () => ['ru-RU', 'ru', 'en-US', 'en'] });
-Object.defineProperty(navigator, 'plugins', { get: () => [1, 2, 3, 4, 5] });
-const originalQuery = window.navigator.permissions && window.navigator.permissions.query;
-if (originalQuery) {
-    window.navigator.permissions.query = (parameters) =>
-        parameters.name === 'notifications'
-            ? Promise.resolve({ state: Notification.permission })
-            : originalQuery(parameters);
-}
-"""
-
-
-def _open_music(page) -> bool:
-    """Открывает music.youtube.com с повторами; при неудаче ждёт ручного ввода URL."""
-    for attempt in range(3):
-        try:
-            page.goto("https://music.youtube.com", wait_until="domcontentloaded", timeout=60000)
-            return True
-        except Exception as e:
-            print(f"Не удалось открыть music.youtube.com (попытка {attempt + 1}/3): {e}")
-            if attempt < 2:
-                page.wait_for_timeout(5000)
-    print("\nАвтоматически открыть сайт не получилось (возможно, нужен VPN/прокси).")
-    print("Открой https://music.youtube.com вручную в открывшемся окне браузера,")
-    print("войди в аккаунт — программа продолжит ждать перехвата заголовков.")
-    return False
-
-
 def auto_browser_auth(creds_path: str) -> None:
     """Automatically extract headers from browser using Playwright."""
     try:
@@ -258,50 +197,32 @@ def auto_browser_auth(creds_path: str) -> None:
 
     def capture_request(request):
         nonlocal captured_headers
-        if request.method == "POST" and "/youtubei/v1/" in request.url:
+        if "music.youtube.com/youtubei/v1/browse" in request.url and request.method == "POST":
             headers = dict(request.headers)
             if "cookie" in headers and "authorization" in headers:
                 captured_headers = headers
 
     try:
         with sync_playwright() as p:
-            browser = _launch_browser(p)
+            browser = p.chromium.launch(headless=False)
             context = browser.new_context()
-            context.add_init_script(STEALTH_JS)
             page = context.new_page()
 
             page.on("request", capture_request)
 
-            _open_music(page)
+            page.goto("https://music.youtube.com")
 
             # Ждём пока пользователь залогинится и headers будут перехвачены
             print("Ожидание авторизации...")
-            print("Войди в аккаунт — браузер закроется сам после перехвата данных.")
-            last_return_attempt = 0.0
-            start = time.monotonic()
-            while time.monotonic() - start < 180:  # максимум 3 минуты
+            for _ in range(120):  # Максимум 2 минуты
                 page.wait_for_timeout(1000)
                 if captured_headers:
                     break
 
-                # Если после входа страница зависла на Google — возвращаемся на music.youtube.com
-                if "accounts.google.com" in page.url and time.monotonic() - last_return_attempt > 5:
-                    last_return_attempt = time.monotonic()
-                    try:
-                        page.goto("https://music.youtube.com", wait_until="domcontentloaded", timeout=30000)
-                    except Exception:
-                        pass
-
-            try:
-                browser.close()
-            except Exception:
-                pass
+            browser.close()
 
         if not captured_headers:
-            print("Не удалось перехватить headers.")
-            print("Если Google показывает «This browser or app may not be secure» —")
-            print("автоматическая авторизация заблокирована. Открой music.youtube.com")
-            print("в обычном браузере и используй ручной способ (вариант 2).")
+            print("Не удалось перехватить headers. Попробуй ручной способ.")
             return
 
         # Сохраняем только нужные headers
@@ -328,22 +249,9 @@ def auto_browser_auth(creds_path: str) -> None:
 
         print(f"\nАвторизация сохранена в {creds_path}")
 
-        try:
-            importer = YoutubeImporter(creds_path)
-            importer.verify_auth()
-            print("Авторизация работает — можно импортировать.")
-        except Exception as e:
-            print(f"\nВнимание: авторизация НЕ работает — {e}")
-            print("Перехваченные заголовки невалидны. Попробуй ручной способ (вариант 2).")
-
     except Exception as e:
-        message = str(e).lower()
-        if "closed" in message or "target" in message:
-            print("Браузер был закрыт вручную до завершения перехвата.")
-            print("Повтори попытку или используй ручной способ (вариант 2).")
-        else:
-            print(f"Ошибка: {e}")
-            print("\nПопробуй ручной способ (вариант 2)")
+        print(f"Ошибка: {e}")
+        print("\nПопробуй ручной способ (вариант 2)")
 
 
 def manual_browser_auth(creds_path: str) -> None:
@@ -368,15 +276,6 @@ def manual_browser_auth(creds_path: str) -> None:
 
     if os.path.exists(creds_path):
         print(f"\nАвторизация сохранена в {creds_path}")
-        try:
-            importer = YoutubeImporter(creds_path)
-            importer.verify_auth()
-            print("Авторизация работает — можно импортировать.")
-        except Exception as e:
-            print(f"\nВнимание: авторизация НЕ работает — {e}")
-            print("Проверь, что скопированы ВСЕ Request Headers именно POST-запроса browse,")
-            print("включая authorization (SAPISIDHASH ...), cookie и x-goog-authuser,")
-            print("и что ты залогинен в YouTube Music в этом браузере.")
     else:
         print("\nОшибка: файл не создан")
 
