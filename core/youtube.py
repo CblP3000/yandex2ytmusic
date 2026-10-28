@@ -20,21 +20,49 @@ from cli.debug import get_logger, redact_headers
 
 logger = get_logger("youtube")
 
+_TOKEN_RE = re.compile(r"^[!#$%&'*+\-.^_`|~0-9A-Za-z]+$")
+_JUNK_HEADERS = {"decoded", "content-encoding", "music.youtube.com"}
+
 
 class LoggingSession(Session):
-    """Session, логирующая методы/URL/статус/классификацию тела HTTP-ответа."""
+    """Session, логирующая методы/URL/статус/классификацию тела HTTP-ответа.
+
+    Автоматически повторяет запросы при сетевых сбоях уровня TLS/соединения
+    (Google периодически рвёт соединения клиентов, не похожих на браузер).
+    """
+
+    _max_retries = 4
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self.last_status: Optional[int] = None
         self.last_url: Optional[str] = None
+        self.last_text: Optional[str] = None
 
     def request(self, *args, **kwargs):
         method = args[0] if args else kwargs.get("method", "?")
         url = args[1] if len(args) > 1 else kwargs.get("url", "?")
         headers = kwargs.get("headers") or {}
         logger.debug("HTTP %s %s headers=%s", method, url, redact_headers(dict(headers)))
-        response = super().request(*args, **kwargs)
+        last_exc = None
+        for attempt in range(self._max_retries):
+            try:
+                response = super().request(*args, **kwargs)
+                self._log_response(method, url, response)
+                return response
+            except (requests.exceptions.SSLError,
+                    requests.exceptions.ConnectionError,
+                    requests.exceptions.Timeout) as e:
+                last_exc = e
+                if attempt < self._max_retries - 1:
+                    logger.warning(
+                        "HTTP %s %s сетевой сбой (попытка %d/%d): %s",
+                        method, url, attempt + 1, self._max_retries, str(e)[:160],
+                    )
+                    time.sleep(0.7 * (attempt + 1))
+        raise last_exc
+
+    def _log_response(self, method: str, url: str, response) -> None:
         body = getattr(response, "text", "") or ""
         kind = "json"
         if not body.strip():
@@ -46,9 +74,31 @@ class LoggingSession(Session):
         limit = 2000 if response.status_code >= 400 else 300
         self.last_status = response.status_code
         self.last_url = url
+        self.last_text = response.text
         logger.info("HTTP %s %s -> %s [%s] body=%d chars", method, url, response.status_code, kind, len(body))
         logger.debug("  body.start: %s", body[:limit].replace("\n", " "))
-        return response
+
+
+def sanitize_browser_headers(data: dict) -> dict:
+    """Убирает из сохранённых браузерных заголовков артефакты ручного копирования
+    (псевдо-заголовки HTTP/2, 'Decoded', 'content-encoding' и т.п.), из-за которых
+    Google закрывает соединение (SSL EOF) или отвечает 400 Bad Request."""
+    clean = {}
+    removed = []
+    for raw_key, value in data.items():
+        key = str(raw_key)
+        low = key.lower()
+        if (low in _JUNK_HEADERS or not _TOKEN_RE.fullmatch(key)
+                or "?" in key or "/" in key or " " in key or key.startswith(":")):
+            removed.append(key)
+            continue
+        clean[key] = value
+    if removed:
+        logger.warning(
+            "browser headers: удалены мусорные заголовки (%d): %s",
+            len(removed), sorted(removed),
+        )
+    return clean
 
 
 def _normalize(text: str) -> str:
@@ -89,8 +139,9 @@ class YoutubeImporter:
 
             if 'cookie' in data or 'Cookie' in data or 'x-origin' in data:
                 self.auth_type = 'browser'
-                keys = {k.lower(): v for k, v in data.items()}
-                logger.info("detected auth_type=browser; header keys: %s", sorted(redact_headers(data).keys()))
+                clean_headers = sanitize_browser_headers(data)
+                keys = {k.lower(): v for k, v in clean_headers.items()}
+                logger.info("detected auth_type=browser; header keys: %s", sorted(redact_headers(clean_headers).keys()))
                 if not keys.get('authorization') or not keys.get('cookie'):
                     logger.error("browser credentials missing required headers: authorization=%s cookie=%s",
                                  bool(keys.get('authorization')), bool(keys.get('cookie')))
@@ -101,7 +152,7 @@ class YoutubeImporter:
                         "как описано в README."
                     )
                 try:
-                    self.ytmusic = YTMusic(token_path, requests_session=LoggingSession())
+                    self.ytmusic = YTMusic(clean_headers, requests_session=LoggingSession())
                 except YTMusicUserError as e:
                     logger.error("YTMusic rejected browser credentials: %s", e)
                     raise ValueError(
@@ -167,23 +218,40 @@ class YoutubeImporter:
         сессия (с деталями ответа сервера).
         """
         logger.info("verify_auth: probing YTMusic API (get_liked_songs limit=1)...")
+        session = getattr(self.ytmusic, "_session", None)
         try:
             result = self.ytmusic.get_liked_songs(limit=1)
             tracks = result.get("tracks", []) if result else []
             logger.info("verify_auth: OK, got %d liked track(s)", len(tracks))
         except Exception as e:
             logger.error("verify_auth: FAILED: %s", e)
-            session = getattr(self.ytmusic, "_session", None)
             status = getattr(session, "last_status", None)
-            if status:
-                logger.error("verify_auth: HTTP status=%s url=%s", status, getattr(session, "last_url", "?"))
+            text = getattr(session, "last_text", "") or ""
+            msg = str(e)
+
+            if "SSLError" in msg or "EOF occurred" in msg or "UNEXPECTED_EOF" in msg:
+                logger.error(
+                    "verify_auth: соединение с сервером оборвано на уровне TLS (SSL EOF). "
+                    "Чаще всего это означает, что в браузерных заголовках есть мусор "
+                    "(например 'Decoded') или сессия устарела. Переустанови авторизацию: "
+                    "меню → Настроить авторизацию YouTube Music → Автоматически через браузер."
+                )
+            elif "twoColumnBrowseResultsRenderer" in msg:
+                logger.error(
+                    "verify_auth: сервер вернул гостевую страницу вместо данных аккаунта — "
+                    "куки не распознаны как авторизованные. Сессия истекла, заголовки "
+                    "скопированы до входа в аккаунт или на другом устройстве/сети. "
+                    "Перелогинься в браузере и пересними авторизацию (автоматический способ)."
+                )
+            elif status:
                 if status == 400:
                     logger.error(
                         "verify_auth: сервер вернул 400 Bad Request — запрос отвергнут. "
-                        "Причины: сессия браузера устарела, заголовки скопированы не целиком "
-                        "или с другого аккаунта/устройства. Переустанови авторизацию заново "
-                        "(меню → Настроить авторизацию YouTube Music), войди в аккаунт свежим "
-                        "и скопируй ВСЕ Request Headers именно POST-запроса browse."
+                        "Причины: мусорные заголовки, сессия браузера устарела, заголовки "
+                        "скопированы не целиком или с другого аккаунта/устройства. "
+                        "Переустанови авторизацию заново (меню → Настроить авторизацию "
+                        "YouTube Music), войди в аккаунт свежим и скопируй ВСЕ Request "
+                        "Headers именно POST-запроса browse."
                     )
                 elif status in (401, 403):
                     logger.error(
@@ -191,6 +259,8 @@ class YoutubeImporter:
                         "Сессия истекла или authorization/cookie не совпадают. "
                         "Переустанови авторизацию заново.", status
                     )
+                else:
+                    logger.error("verify_auth: HTTP status=%s url=%s", status, getattr(session, "last_url", "?"))
             else:
                 logger.error("verify_auth: авторизация не работает — сессия истекла или headers невалидны.")
                 logger.error("verify_auth: переустанови авторизацию: меню → Настроить авторизацию YouTube Music.")
@@ -299,7 +369,7 @@ class YoutubeImporter:
             else:
                 tracks_to_add.append(video_id)
         
-        self.ytmusic.create_playlist(playlist.title, playlist.description, video_ids=tracks_to_add)
+        self.ytmusic.create_playlist(playlist.title, playlist.description or "", video_ids=tracks_to_add)
         
         return (not_found, errors)
 
