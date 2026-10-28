@@ -3,9 +3,10 @@ import os
 
 from core import YandexMusicExporter
 from core import YoutubeImporter
-from core.track import Track
 from core.playlist import Playlist
 from core.podcast import Podcast
+from core.track import Track
+from cli.menu import Menu
 
 
 def export_from_yandex(out_path: str) -> None:
@@ -70,14 +71,19 @@ def import_to_youtube(in_path: str, youtube_creds: str) -> None:
         playlists.append(Playlist(playlist['title'], playlist['description'], tracklist))
     print(f'Загружено {len(playlists)} плейлистов из {in_path}')
 
-    # Выбор режима импорта
-    print("\nРежим импорта:")
-    print("  1. Быстрый (параллельный, порядок не сохраняется)")
-    print("  2. С сохранением порядка (медленнее)")
-    mode_choice = input("\nВыбор (1-2): ").strip()
+    menu = Menu("Режим импорта")
+    menu.add(
+        "Быстрый (параллельный, порядок не сохраняется)",
+        lambda: _run_import(data, tracks, podcasts, playlists, in_path, youtube_creds, keep_order=False),
+    )
+    menu.add(
+        "С сохранением порядка (медленнее)",
+        lambda: _run_import(data, tracks, podcasts, playlists, in_path, youtube_creds, keep_order=True),
+    )
+    menu.run()
 
-    keep_order = mode_choice != "1"
 
+def _run_import(data, tracks, podcasts, playlists, in_path, youtube_creds, keep_order: bool) -> None:
     exporter = YoutubeImporter(youtube_creds)
 
     print('Импорт треков в YouTube Music...')
@@ -96,9 +102,9 @@ def import_to_youtube(in_path: str, youtube_creds: str) -> None:
     data['errors'].extend([{'title': p.title} for p in playlist_errors])
 
     print(f'{len(playlist_errors)} ошибок при создании плейлистов.')
-    
+
     print()
-    
+
     print('Импорт подкастов в YouTube Music...')
     podcasts_not_found, podcasts_errors = exporter.import_liked_podcasts(podcasts, keep_order=keep_order)
 
@@ -117,18 +123,10 @@ def import_to_youtube(in_path: str, youtube_creds: str) -> None:
 
 def setup_youtube_auth(creds_path: str) -> None:
     """Setup YouTube Music authentication."""
-    print("\nВыбери способ авторизации YouTube Music:")
-    print("  1. Автоматически через браузер (откроется окно)")
-    print("  2. Вручную (вставить headers)")
-
-    choice = input("\nВыбор (1-2): ").strip()
-
-    if choice == "1":
-        auto_browser_auth(creds_path)
-    elif choice == "2":
-        manual_browser_auth(creds_path)
-    else:
-        print("Неверный выбор")
+    menu = Menu("Способ авторизации YouTube Music")
+    menu.add("Автоматически через браузер (откроется окно)", lambda: auto_browser_auth(creds_path))
+    menu.add("Вручную (вставить headers)", lambda: manual_browser_auth(creds_path))
+    menu.run()
 
 
 def auto_browser_auth(creds_path: str) -> None:
@@ -252,25 +250,13 @@ def main() -> None:
     tracks_path = "tracks.json"
     youtube_creds = "browser.json"
 
-    print("=== Yandex Music → YouTube Music ===\n")
-    print("Что хочешь сделать?")
-    print("  1. Полный перенос (экспорт из Яндекса + импорт в YouTube)")
-    print("  2. Только экспорт из Яндекс Музыки")
-    print("  3. Только импорт в YouTube Music (из файла)")
-    print("  4. Настроить авторизацию YouTube Music")
-
-    choice = input("\nВыбор (1-4): ").strip()
-
-    if choice == "1":
-        full_transfer(tracks_path, youtube_creds)
-    elif choice == "2":
-        export_from_yandex(tracks_path)
-    elif choice == "3":
-        import_to_youtube(tracks_path, youtube_creds)
-    elif choice == "4":
-        setup_youtube_auth(youtube_creds)
-    else:
-        print("Неверный выбор")
+    menu = Menu("=== Yandex Music → YouTube Music ===", "Что хочешь сделать?")
+    menu.add("Полный перенос (экспорт из Яндекса + импорт в YouTube)", lambda: full_transfer(tracks_path, youtube_creds))
+    menu.add("Только экспорт из Яндекс Музыки", lambda: export_from_yandex(tracks_path))
+    menu.add("Только импорт в YouTube Music (из файла)", lambda: import_to_youtube(tracks_path, youtube_creds))
+    menu.add("Настроить авторизацию YouTube Music", lambda: setup_youtube_auth(youtube_creds))
+    menu.add("Выход")
+    menu.run()
 
 
 if __name__ == '__main__':
