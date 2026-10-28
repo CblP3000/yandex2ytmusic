@@ -2,8 +2,7 @@
 
 Перенос понравившихся треков, плейлистов и подкастов из Yandex.Музыка в YouTube Music.
 
-## Функционал
-Большое спасибо @kirillqa17
+> Форк [gosha20777/yandex2ytmusic](https://github.com/gosha20777/yandex2ytmusic). Большое спасибо @kirillqa17
 
 | Фича | Эта версия |
 |------|------------|
@@ -27,7 +26,7 @@
 ## Установка
 
 ```bash
-git clone https://github.com/kirillqa17/yandex2ytmusic.git
+git clone https://github.com/CblP3000/yandex2ytmusic.git
 cd yandex2ytmusic
 pip install -r requirements.txt
 playwright install chromium

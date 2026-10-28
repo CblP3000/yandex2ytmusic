@@ -30,7 +30,7 @@ Transfer liked tracks, playlists and podcasts from Yandex.Music to YouTube Music
 ## Installation
 
 ```bash
-git clone https://github.com/kirillqa17/yandex2ytmusic.git
+git clone https://github.com/CblP3000/yandex2ytmusic.git
 cd yandex2ytmusic
 pip install -r requirements.txt
 playwright install chromium
