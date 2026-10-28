@@ -129,31 +129,16 @@ python main.py
 
 #### Вариант 2: Вручную (если автоматический не работает)
 
-1. Открой [music.youtube.com](https://music.youtube.com) в **обычном браузере**
-2. Войди в аккаунт Google и **убедись, что вверху справа виден твой аватар** — без этого заголовки будут гостевые, и авторизация не заработает (сервер ответит «Sign in»)
-3. Перезагрузи страницу (F5), чтобы все запросы шли от авторизованной сессии
-4. Открой DevTools (F12)
-5. Перейди на вкладку **Network** (Сеть), в фильтре введи `browse`
-6. Найди **POST** запрос к `browse?...` и кликни на него
-7. Скопируй **все** Request Headers:
+1. Открой [music.youtube.com](https://music.youtube.com) (войди в аккаунт)
+2. Открой DevTools (F12)
+3. Перейди на вкладку **Network** (Сеть)
+4. В фильтре введи `browse`
+5. Кликни на любую страницу в YouTube Music
+6. Найди POST запрос к `browse?...` и кликни на него
+7. Скопируй Request Headers:
    - **Firefox**: правый клик → Copy Value → Copy Request Headers
    - **Chrome**: правый клик → Copy → Copy request headers
-   - Убедись, что среди строк есть `authorization: SAPISIDHASH ...`, `cookie: ...` и `x-goog-authuser: ...`
-8. Вставь в терминал и нажми **Ctrl+D** (или сохрани в файл и укажи путь)
-
-Программа сразу проверит авторизацию и сообщит, работает ли она.
-
-#### Вариант 3: OAuth токен (рекомендуется, если браузерные headers не работают)
-
-OAuth не зависит от браузерных cookies — токен обновляется автоматически.
-
-1. Перейди на [console.cloud.google.com/apis/credentials](https://console.cloud.google.com/apis/credentials)
-2. Создай проект → включи **YouTube Data API v3**
-3. Создай **OAuth Client ID** (тип приложения: Desktop app)
-4. Скачай **JSON-файл** и сохрани его как `oauth_client_secrets.json` в папке программы
-5. В программе: «Настроить авторизацию YouTube Music» → «OAuth токен»
-6. Откроется браузер — авторизуйся и разреши доступ
-7. Программа сохранит токен и сразу проверит его
+8. Вставь в терминал и нажми **Ctrl+D**
 
 ### Шаг 4: Импорт в YouTube Music
 
@@ -231,34 +216,6 @@ python main.py
 ### Ошибка 400 Bad Request с OAuth
 
 Используй Browser authentication вместо OAuth. Он работает стабильнее.
-
-### Ошибка 400 Bad Request (HTML-страница Google)
-
-Сервер отвергает запрос. Типичная причина: в `browser.json` попали посторонние поля из DevTools (например `/youtubei/v1/browse?prettyPrint=false`, `music.youtube.com`, `Decoded`) — они не являются HTTP-заголовками. Программа автоматически их игнорирует (предупреждение в логе: «browser.json содержит не-HTTP поля»). Если 400 остаётся — переустанови авторизацию заново и скопируй headers именно с POST-запроса browse.
-
-### «Sign in» / гостевая сессия при проверке авторизации
-
-Если `verify_auth` пишет, что сервер ответил гостевой страницей («Sign in to listen to your liked tracks») — заголовки в `browser.json` скопированы из неавторизованной сессии. Значит, на момент копирования ты не был залогинен в YouTube Music. Решение: войди в аккаунт, дождись загрузки (вверху справа должен быть твой аватар), перезагрузи страницу и скопируй Request Headers именно POST-запроса browse заново.
-
-### Ошибка SSLError / SSLEOFError (обрыв TLS)
-
-Соединение рвётся на уровне TLS. Чаще всего причина — прокси-переменные окружения (`HTTP_PROXY`, `HTTPS_PROXY`, `ALL_PROXY`), которые `requests` использует автоматически. Проверь:
-
-```bash
-env | grep -i proxy
-```
-
-Если прокси не нужен для YouTube, отключи его для этого домена:
-
-```bash
-export NO_PROXY=$NO_PROXY,music.youtube.com,youtube.com,googleapis.com,ggpht.com
-```
-
-или запусти программу без прокси:
-
-```bash
-env -u HTTP_PROXY -u HTTPS_PROXY -u http_proxy -u https_proxy -u ALL_PROXY -u all_proxy python main.py
-```
 
 ### Автоматическая авторизация не работает
 

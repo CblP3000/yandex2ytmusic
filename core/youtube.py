@@ -7,7 +7,6 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from difflib import SequenceMatcher
 
 import requests
-from requests.exceptions import SSLError
 from requests.sessions import Session
 
 from tqdm import tqdm
@@ -22,52 +21,6 @@ from cli.debug import get_logger, redact_headers
 logger = get_logger("youtube")
 
 
-def _proxy_env_summary() -> str:
-    """Краткая сводка прокси-переменных окружения (без паролей)."""
-    parts = []
-    for var in ("HTTPS_PROXY", "https_proxy", "HTTP_PROXY", "http_proxy", "ALL_PROXY", "all_proxy"):
-        value = os.environ.get(var)
-        if value:
-            safe = value.split("@")[-1]
-            parts.append(f"{var}={safe}")
-    return ", ".join(parts) or "нет"
-
-
-def _log_ssl_error(method: str, url: str, e: Exception) -> None:
-    logger.error("HTTP %s %s -> SSLError: %s", method, url, e)
-    logger.error("TLS-соединение оборвано. Вероятные причины:")
-    proxy_summary = _proxy_env_summary()
-    if proxy_summary != "нет":
-        logger.error("  - активны прокси-переменные окружения: %s", proxy_summary)
-        logger.error("    Если прокси не нужен для YouTube, отключи его для этого домена:")
-        logger.error("    export NO_PROXY=$NO_PROXY,music.youtube.com,youtube.com,googleapis.com,ggpht.com")
-        logger.error("    или сними прокси целиком: unset HTTP_PROXY HTTPS_PROXY http_proxy https_proxy ALL_PROXY all_proxy")
-    else:
-        logger.error("  - файрвол/DPI или нестабильный интернет блокируют music.youtube.com")
-        logger.error("  - IPv6-маршрут не работает; попробуй принудительно IPv4")
-
-
-def _clean_header_dict(headers: dict) -> dict:
-    """Убирает из словаря заголовков мусорные поля (артефакты DevTools).
-
-    Например, Chrome при копировании Request Headers добавляет строки вида
-    «/youtubei/v1/browse?prettyPrint=false», «music.youtube.com», «Decoded»,
-    которые не являются HTTP-заголовками и вызывают у сервера ошибку 400.
-    """
-    valid_name = re.compile(r"^[A-Za-z0-9_-]+$")
-    known_junk = {"decoded"}
-    clean = {}
-    dropped = []
-    for key, value in headers.items():
-        if isinstance(value, str) and valid_name.match(key) and key.lower() not in known_junk:
-            clean[key] = value
-        else:
-            dropped.append(key)
-    if dropped:
-        logger.warning("browser.json содержит не-HTTP поля, они проигнорированы: %s", dropped)
-    return clean
-
-
 class LoggingSession(Session):
     """Session, логирующая методы/URL/статус/классификацию тела HTTP-ответа."""
 
@@ -75,18 +28,13 @@ class LoggingSession(Session):
         super().__init__(*args, **kwargs)
         self.last_status: Optional[int] = None
         self.last_url: Optional[str] = None
-        self.last_body: str = ""
 
     def request(self, *args, **kwargs):
         method = args[0] if args else kwargs.get("method", "?")
         url = args[1] if len(args) > 1 else kwargs.get("url", "?")
         headers = kwargs.get("headers") or {}
         logger.debug("HTTP %s %s headers=%s", method, url, redact_headers(dict(headers)))
-        try:
-            response = super().request(*args, **kwargs)
-        except SSLError as e:
-            _log_ssl_error(method, url, e)
-            raise
+        response = super().request(*args, **kwargs)
         body = getattr(response, "text", "") or ""
         kind = "json"
         if not body.strip():
@@ -98,7 +46,6 @@ class LoggingSession(Session):
         limit = 2000 if response.status_code >= 400 else 300
         self.last_status = response.status_code
         self.last_url = url
-        self.last_body = body[:3000]
         logger.info("HTTP %s %s -> %s [%s] body=%d chars", method, url, response.status_code, kind, len(body))
         logger.debug("  body.start: %s", body[:limit].replace("\n", " "))
         return response
@@ -142,7 +89,6 @@ class YoutubeImporter:
 
             if 'cookie' in data or 'Cookie' in data or 'x-origin' in data:
                 self.auth_type = 'browser'
-                data = _clean_header_dict(data)
                 keys = {k.lower(): v for k, v in data.items()}
                 logger.info("detected auth_type=browser; header keys: %s", sorted(redact_headers(data).keys()))
                 if not keys.get('authorization') or not keys.get('cookie'):
@@ -155,7 +101,7 @@ class YoutubeImporter:
                         "как описано в README."
                     )
                 try:
-                    self.ytmusic = YTMusic(data, requests_session=LoggingSession())
+                    self.ytmusic = YTMusic(token_path, requests_session=LoggingSession())
                 except YTMusicUserError as e:
                     logger.error("YTMusic rejected browser credentials: %s", e)
                     raise ValueError(
@@ -225,31 +171,11 @@ class YoutubeImporter:
             result = self.ytmusic.get_liked_songs(limit=1)
             tracks = result.get("tracks", []) if result else []
             logger.info("verify_auth: OK, got %d liked track(s)", len(tracks))
-        except SSLError as e:
-            _log_ssl_error("PROBE", "music.youtube.com/youtubei/v1/browse", e)
-            raise
         except Exception as e:
             logger.error("verify_auth: FAILED: %s", e)
             session = getattr(self.ytmusic, "_session", None)
             status = getattr(session, "last_status", None)
-            body = getattr(session, "last_body", "") or ""
-            body_lower = body.lower()
-            guest_session = "sign in" in body_lower or "looking for what" in body_lower
-            if status == 200 and guest_session:
-                logger.error(
-                    "verify_auth: сервер ответил 200, но вернул гостевое страницу («Sign in»). "
-                    "Заголовки скопированы из неавторизованной сессии: ты не был залогинен "
-                    "в YouTube Music на момент копирования. Войди в аккаунт на music.youtube.com, "
-                    "дождись загрузки (должен быть виден твой аватар), перезагрузи страницу "
-                    "и скопируй Request Headers именно POST-запроса browse заново."
-                )
-            elif status == 200:
-                logger.error(
-                    "verify_auth: сервер ответил 200, но структура ответа неожиданная "
-                    "(нет данных плейлистов). Возможно, изменён формат API или сессия "
-                    "неполная. Переустанови авторизацию заново."
-                )
-            elif status:
+            if status:
                 logger.error("verify_auth: HTTP status=%s url=%s", status, getattr(session, "last_url", "?"))
                 if status == 400:
                     logger.error(

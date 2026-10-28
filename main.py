@@ -138,18 +138,10 @@ def import_to_youtube(in_path: str, youtube_creds: str) -> None:
     menu.run()
 
 
-OAUTH_SECRETS_DEFAULT = "oauth_client_secrets.json"
-
-
-def _oauth_secrets_path() -> str | None:
-    path = OAUTH_SECRETS_DEFAULT
-    return path if os.path.exists(path) else None
-
-
 def _run_import(data, tracks, podcasts, playlists, in_path, youtube_creds, keep_order: bool) -> None:
     logger.info("_run_import: keep_order=%s", keep_order)
     try:
-        exporter = YoutubeImporter(youtube_creds, client_secrets_path=_oauth_secrets_path())
+        exporter = YoutubeImporter(youtube_creds)
         exporter.verify_auth()
     except Exception as e:
         logger.error("YoutubeImporter init/verify failed: %s", e)
@@ -195,7 +187,6 @@ def setup_youtube_auth(creds_path: str) -> None:
     menu = Menu("Способ авторизации YouTube Music")
     menu.add("Автоматически через браузер (откроется окно)", lambda: auto_browser_auth(creds_path))
     menu.add("Вручную (вставить headers)", lambda: manual_browser_auth(creds_path))
-    menu.add("OAuth токен (Google OAuth, надёжно)", lambda: setup_oauth_auth(creds_path))
     menu.run()
 
 
@@ -218,45 +209,21 @@ def auto_browser_auth(creds_path: str) -> None:
     captured_headers = {}
     post_count = 0
     authed_post_count = 0
-    guest_count = 0
-    auth_checked_count = 0
 
     def capture_request(request):
-        nonlocal post_count, authed_post_count
+        nonlocal captured_headers, post_count, authed_post_count
         if request.method == "POST" and "/youtubei/v1/" in request.url:
             post_count += 1
             headers = dict(request.headers)
             if "cookie" in headers and "authorization" in headers:
                 authed_post_count += 1
-
-    def capture_response(response):
-        nonlocal captured_headers, guest_count, auth_checked_count
-        if captured_headers:
-            return
-        url = response.url
-        if not (url.startswith("https://music.youtube.com/youtubei/v1/") and "browse" in url):
-            return
-        try:
-            body = response.body()
-        except Exception:
-            return
-        if b"twoColumnBrowseResultsRenderer" in body:
-            auth_checked_count += 1
-            headers = dict(response.request.headers)
-            if "cookie" in headers and "authorization" in headers:
-                captured_headers = headers
                 logger.info(
-                    "captured AUTHORIZED browse (twoColumnBrowseResultsRenderer) keys=%s",
+                    "captured POST %s (authed=%d) keys=%s",
+                    request.url.split("/youtubei/v1/")[-1].split("?")[0],
+                    authed_post_count,
                     sorted(redact_headers(headers).keys()),
                 )
-            else:
-                logger.warning(
-                    "browse-ответ авторизован, но без cookie/authorization? keys=%s",
-                    sorted(redact_headers(headers).keys()),
-                )
-        elif b"Sign in" in body:
-            guest_count += 1
-            logger.info("browse-ответ: гостевой (Sign in) — жду авторизации...")
+                captured_headers = headers
 
     try:
         with sync_playwright() as p:
@@ -271,7 +238,6 @@ def auto_browser_auth(creds_path: str) -> None:
             page = context.new_page()
 
             page.on("request", capture_request)
-            page.on("response", capture_response)
 
             logger.info("goto https://music.youtube.com ...")
             try:
@@ -281,25 +247,23 @@ def auto_browser_auth(creds_path: str) -> None:
                 logger.error("goto failed: %s (url=%s)", e, page.url)
                 raise
 
-            # Ждём пока пользователь залогинится и будет перехвачен АВТОРИЗОВАННЫЙ browse
+            # Ждём пока пользователь залогинится и headers будут перехвачены
             print("Ожидание авторизации...")
-            print("Войди в аккаунт. Если страница уже загружена — нажми F5, чтобы")
-            print("пошли новые запросы от авторизованной сессии.")
             last_log = 0.0
-            for _ in range(180):  # Максимум 3 минуты
+            for _ in range(120):  # Максимум 2 минуты
                 page.wait_for_timeout(1000)
                 if captured_headers:
                     break
                 if time.monotonic() - last_log > 10:
                     last_log = time.monotonic()
                     logger.info(
-                        "waiting... url=%s posts=%d authed=%d guest=%d",
-                        page.url[:120], post_count, authed_post_count, guest_count,
+                        "waiting... url=%s posts=%d authed=%d",
+                        page.url[:120], post_count, authed_post_count,
                     )
 
             logger.info(
-                "wait loop finished: captured=%s posts=%d authed=%d guest=%d url=%s",
-                bool(captured_headers), post_count, authed_post_count, guest_count, page.url[:120],
+                "wait loop finished: captured=%s posts=%d authed=%d url=%s",
+                bool(captured_headers), post_count, authed_post_count, page.url[:120],
             )
 
             try:
@@ -308,13 +272,8 @@ def auto_browser_auth(creds_path: str) -> None:
                 pass
 
         if not captured_headers:
-            print("Не удалось перехватить авторизованные заголовки.")
-            if guest_count:
-                print(f"Сервер вернул гостевую страницу (Sign in) {guest_count} раз —")
-                print("вход в аккаунт не завершён или не был выполнен.")
-            print("Войди в аккаунт (должен быть виден аватар), нажми F5 и подожди.")
-            logger.error("no authorized headers captured: posts=%d authed=%d guest=%d",
-                         post_count, authed_post_count, guest_count)
+            print("Не удалось перехватить headers. Попробуй ручной способ.")
+            logger.error("no headers captured: posts=%d authed=%d", post_count, authed_post_count)
             return
 
         # Сохраняем только нужные headers (которые реально были в захваченном запросе)
@@ -350,13 +309,11 @@ def manual_browser_auth(creds_path: str) -> None:
     from ytmusicapi import setup
 
     print("\n=== Ручная авторизация ===")
-    print("1. Открой https://music.youtube.com в браузере")
-    print("2. Войди в аккаунт Google и УБЕДИСЬ, что вверху справа виден твой аватар")
-    print("   (без этого заголовки будут гостевые и авторизация не заработает)")
-    print("3. Перезагрузи страницу (F5), чтобы все запросы шли от авторизованной сессии")
-    print("4. Открой DevTools (F12), вкладка Network, фильтр по 'browse'")
-    print("5. Кликни на любой POST запрос к browse?...")
-    print("6. Скопируй ВСЕ Request Headers и сохрани их в текстовый файл")
+    print("1. Открой https://music.youtube.com в браузере (войди в аккаунт)")
+    print("2. Открой DevTools (F12)")
+    print("3. Вкладка Network, фильтр по 'browse'")
+    print("4. Кликни на любой POST запрос к browse?...")
+    print("5. Скопируй ВСЕ Request Headers и сохрани их в текстовый файл")
     print("\nТерминал может обрезать длинную строку cookie при вставке, поэтому лучше через файл.")
     headers_path = input("Путь к файлу с заголовками (Enter — вставить вручную): ").strip().strip("'\"")
 
@@ -376,7 +333,7 @@ def manual_browser_auth(creds_path: str) -> None:
         print(f"\nАвторизация сохранена в {creds_path}")
         logger.info("credentials saved to %s", creds_path)
         try:
-            importer = YoutubeImporter(creds_path, client_secrets_path=_oauth_secrets_path())
+            importer = YoutubeImporter(creds_path)
             importer.verify_auth()
             print("Авторизация работает — можно импортировать.")
         except Exception as e:
@@ -386,50 +343,6 @@ def manual_browser_auth(creds_path: str) -> None:
             print("и что ты залогинен в YouTube Music в этом браузере.")
     else:
         print("\nОшибка: файл не создан")
-
-
-def setup_oauth_auth(creds_path: str, secrets_path: str = OAUTH_SECRETS_DEFAULT) -> None:
-    """OAuth-авторизация через Google OAuth API (без браузерных заголовков)."""
-    from ytmusicapi import setup_oauth
-
-    print("\n=== OAuth авторизация ===")
-    if not os.path.exists(secrets_path):
-        print("Для OAuth нужен файл client_secrets.json от Google Cloud:")
-        print("1. Перейди на https://console.cloud.google.com/apis/credentials")
-        print("2. Создай проект → включи «YouTube Data API v3»")
-        print("3. Создай OAuth Client ID (тип приложения: Desktop app)")
-        print("4. Скачай JSON-файл и сохрани его как", secrets_path)
-        secrets_path = input(
-            f"\nПуть к client_secrets.json (Enter — {OAUTH_SECRETS_DEFAULT}): "
-        ).strip() or secrets_path
-
-    if not os.path.exists(secrets_path):
-        print(f"Файл {secrets_path} не найден.")
-        return
-
-    with open(secrets_path, encoding='utf-8') as f:
-        secrets = json.load(f)['installed']
-
-    print("\nОткроется браузер для подтверждения доступа...")
-    print("Авторизуйся и разреши доступ — программа сохранит токен.")
-    try:
-        setup_oauth(secrets['client_id'], secrets['client_secret'], filepath=creds_path, open_browser=True)
-        logger.info("oauth token saved to %s", creds_path)
-    except Exception as e:
-        logger.error("oauth setup failed: %s", e)
-        print(f"Ошибка: {e}")
-        return
-
-    if os.path.exists(creds_path):
-        print(f"\nТокен сохранён в {creds_path}")
-        try:
-            importer = YoutubeImporter(creds_path, client_secrets_path=secrets_path)
-            importer.verify_auth()
-            print("Авторизация работает — можно импортировать.")
-        except Exception as e:
-            print(f"\nВнимание: авторизация НЕ работает — {e}")
-    else:
-        print("\nОшибка: файл токена не создан")
 
 
 def full_transfer(tracks_path: str, youtube_creds: str) -> None:
