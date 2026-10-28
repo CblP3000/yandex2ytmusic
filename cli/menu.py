@@ -15,6 +15,9 @@ from dataclasses import dataclass
 from typing import Any, Callable
 
 from cli.ui import CharKey, Key, TerminalSession, read_key
+from cli.debug import get_logger
+
+logger = get_logger("menu")
 
 
 @dataclass
@@ -57,10 +60,13 @@ class BaseMenu:
         self._draw()
         while True:
             key = read_key()
+            logger.debug("key: %s", key)
             action = self._handle_key(key)
             if action == "confirm":
+                logger.debug("menu confirmed (selected=%d)", self.selected)
                 return True
             if action == "abort":
+                logger.debug("menu aborted")
                 return False
             self._draw()
 

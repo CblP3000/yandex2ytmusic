@@ -1,5 +1,6 @@
 import json
 import os
+import time
 
 from core import YandexMusicExporter
 from core import YoutubeImporter
@@ -7,6 +8,9 @@ from core.playlist import Playlist
 from core.podcast import Podcast
 from core.track import Track
 from cli.menu import Menu, MultiSelectMenu
+from cli.debug import get_logger, redact_headers
+
+logger = get_logger("main")
 
 
 def choose_playlists(title: str, playlists: list) -> list:
@@ -120,6 +124,8 @@ def import_to_youtube(in_path: str, youtube_creds: str) -> None:
         playlists.append(Playlist(playlist['title'], playlist['description'], tracklist))
     print(f'Загружено {len(playlists)} плейлистов из {in_path}')
 
+    logger.info("import_to_youtube: tracks=%d podcasts=%d playlists=%d", len(tracks), len(podcasts), len(playlists))
+
     menu = Menu("Режим импорта")
     menu.add(
         "Быстрый (параллельный, порядок не сохраняется)",
@@ -133,7 +139,13 @@ def import_to_youtube(in_path: str, youtube_creds: str) -> None:
 
 
 def _run_import(data, tracks, podcasts, playlists, in_path, youtube_creds, keep_order: bool) -> None:
-    exporter = YoutubeImporter(youtube_creds)
+    logger.info("_run_import: keep_order=%s", keep_order)
+    try:
+        exporter = YoutubeImporter(youtube_creds)
+        exporter.verify_auth()
+    except Exception as e:
+        logger.error("YoutubeImporter init/verify failed: %s", e)
+        raise
 
     print('Импорт треков в YouTube Music...')
     tracks_not_found, tracks_errors = exporter.import_liked_tracks(tracks, keep_order=keep_order)
@@ -182,6 +194,7 @@ def auto_browser_auth(creds_path: str) -> None:
     """Automatically extract headers from browser using Playwright."""
     try:
         from playwright.sync_api import sync_playwright
+        logger.info("playwright imported OK")
     except ImportError:
         print("Установи playwright:")
         print("  pip install playwright")
@@ -194,62 +207,99 @@ def auto_browser_auth(creds_path: str) -> None:
     print("3. Браузер закроется автоматически\n")
 
     captured_headers = {}
+    post_count = 0
+    authed_post_count = 0
 
     def capture_request(request):
-        nonlocal captured_headers
-        if "music.youtube.com/youtubei/v1/browse" in request.url and request.method == "POST":
+        nonlocal captured_headers, post_count, authed_post_count
+        if request.method == "POST" and "/youtubei/v1/" in request.url:
+            post_count += 1
             headers = dict(request.headers)
             if "cookie" in headers and "authorization" in headers:
+                authed_post_count += 1
+                logger.info(
+                    "captured POST %s (authed=%d) keys=%s",
+                    request.url.split("/youtubei/v1/")[-1].split("?")[0],
+                    authed_post_count,
+                    sorted(redact_headers(headers).keys()),
+                )
                 captured_headers = headers
 
     try:
         with sync_playwright() as p:
-            browser = p.chromium.launch(headless=False)
+            logger.info("launching chromium...")
+            try:
+                browser = p.chromium.launch(headless=False)
+            except Exception as e:
+                logger.error("chromium launch failed: %s", e)
+                raise
+            logger.info("browser launched")
             context = browser.new_context()
             page = context.new_page()
 
             page.on("request", capture_request)
 
-            page.goto("https://music.youtube.com")
+            logger.info("goto https://music.youtube.com ...")
+            try:
+                page.goto("https://music.youtube.com")
+                logger.info("goto OK, url=%s", page.url)
+            except Exception as e:
+                logger.error("goto failed: %s (url=%s)", e, page.url)
+                raise
 
             # Ждём пока пользователь залогинится и headers будут перехвачены
             print("Ожидание авторизации...")
+            last_log = 0.0
             for _ in range(120):  # Максимум 2 минуты
                 page.wait_for_timeout(1000)
                 if captured_headers:
                     break
+                if time.monotonic() - last_log > 10:
+                    last_log = time.monotonic()
+                    logger.info(
+                        "waiting... url=%s posts=%d authed=%d",
+                        page.url[:120], post_count, authed_post_count,
+                    )
 
-            browser.close()
+            logger.info(
+                "wait loop finished: captured=%s posts=%d authed=%d url=%s",
+                bool(captured_headers), post_count, authed_post_count, page.url[:120],
+            )
+
+            try:
+                browser.close()
+            except Exception:
+                pass
 
         if not captured_headers:
             print("Не удалось перехватить headers. Попробуй ручной способ.")
+            logger.error("no headers captured: posts=%d authed=%d", post_count, authed_post_count)
             return
 
-        # Сохраняем только нужные headers
-        headers_to_save = {
-            "accept": captured_headers.get("accept", "*/*"),
-            "accept-encoding": captured_headers.get("accept-encoding", "gzip, deflate"),
-            "accept-language": captured_headers.get("accept-language", "en-US,en;q=0.9"),
-            "authorization": captured_headers.get("authorization", ""),
-            "content-type": captured_headers.get("content-type", "application/json"),
-            "cookie": captured_headers.get("cookie", ""),
-            "origin": "https://music.youtube.com",
-            "referer": "https://music.youtube.com/",
-            "user-agent": captured_headers.get("user-agent", ""),
-            "x-goog-authuser": captured_headers.get("x-goog-authuser", "0"),
-            "x-goog-visitor-id": captured_headers.get("x-goog-visitor-id", ""),
-            "x-origin": "https://music.youtube.com",
-            "x-youtube-bootstrap-logged-in": captured_headers.get("x-youtube-bootstrap-logged-in", "true"),
-            "x-youtube-client-name": captured_headers.get("x-youtube-client-name", "67"),
-            "x-youtube-client-version": captured_headers.get("x-youtube-client-version", ""),
-        }
+        # Сохраняем только нужные headers (которые реально были в захваченном запросе)
+        essential = [
+            "accept", "accept-language", "authorization", "content-type", "cookie",
+            "origin", "referer", "user-agent", "x-goog-authuser", "x-goog-visitor-id",
+            "x-origin", "x-youtube-bootstrap-logged-in", "x-youtube-client-name",
+            "x-youtube-client-version",
+        ]
+        headers_to_save = {key: captured_headers[key] for key in essential if captured_headers.get(key)}
+        if "authorization" not in headers_to_save or "cookie" not in headers_to_save:
+            logger.error("captured headers missing required authorization/cookie: keys=%s",
+                         sorted(redact_headers(headers_to_save).keys()))
+            print("Ошибка: захваченные заголовки неполные (нет authorization или cookie).")
+            print("Переустанови авторизацию заново или используй ручной способ.")
+            return
 
         with open(creds_path, 'w') as f:
             json.dump(headers_to_save, f, indent=4)
 
+        logger.info("saved %s: keys=%s", creds_path, sorted(redact_headers(headers_to_save).keys()))
+
         print(f"\nАвторизация сохранена в {creds_path}")
 
     except Exception as e:
+        logger.error("auto_browser_auth failed: %s", e)
         print(f"Ошибка: {e}")
         print("\nПопробуй ручной способ (вариант 2)")
 
@@ -267,15 +317,30 @@ def manual_browser_auth(creds_path: str) -> None:
     print("\nТерминал может обрезать длинную строку cookie при вставке, поэтому лучше через файл.")
     headers_path = input("Путь к файлу с заголовками (Enter — вставить вручную): ").strip().strip("'\"")
 
-    if headers_path:
-        with open(os.path.expanduser(headers_path), encoding='utf-8') as f:
-            setup(filepath=creds_path, headers_raw=f.read())
-    else:
-        print("\nВставь заголовки и нажми Ctrl+D (Ctrl+Z и Enter в Windows):\n")
-        setup(filepath=creds_path)
+    try:
+        if headers_path:
+            with open(os.path.expanduser(headers_path), encoding='utf-8') as f:
+                setup(filepath=creds_path, headers_raw=f.read())
+        else:
+            print("\nВставь заголовки и нажми Ctrl+D (Ctrl+Z и Enter в Windows):\n")
+            setup(filepath=creds_path)
+        logger.info("manual setup() completed")
+    except Exception as e:
+        logger.error("manual setup() failed: %s", e)
+        raise
 
     if os.path.exists(creds_path):
         print(f"\nАвторизация сохранена в {creds_path}")
+        logger.info("credentials saved to %s", creds_path)
+        try:
+            importer = YoutubeImporter(creds_path)
+            importer.verify_auth()
+            print("Авторизация работает — можно импортировать.")
+        except Exception as e:
+            print(f"\nВнимание: авторизация НЕ работает — {e}")
+            print("Проверь, что скопированы ВСЕ Request Headers именно POST-запроса browse,")
+            print("включая authorization (SAPISIDHASH ...), cookie и x-goog-authuser,")
+            print("и что ты залогинен в YouTube Music в этом браузере.")
     else:
         print("\nОшибка: файл не создан")
 

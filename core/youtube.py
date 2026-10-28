@@ -6,12 +6,49 @@ import unicodedata
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from difflib import SequenceMatcher
 
+import requests
+from requests.sessions import Session
+
 from tqdm import tqdm
 from ytmusicapi import YTMusic, setup_oauth
+from ytmusicapi.exceptions import YTMusicUserError
 from typing import List, Tuple, Optional
 from .track import Track
 from .podcast import Podcast
 from .playlist import Playlist
+from cli.debug import get_logger, redact_headers
+
+logger = get_logger("youtube")
+
+
+class LoggingSession(Session):
+    """Session, логирующая методы/URL/статус/классификацию тела HTTP-ответа."""
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.last_status: Optional[int] = None
+        self.last_url: Optional[str] = None
+
+    def request(self, *args, **kwargs):
+        method = args[0] if args else kwargs.get("method", "?")
+        url = args[1] if len(args) > 1 else kwargs.get("url", "?")
+        headers = kwargs.get("headers") or {}
+        logger.debug("HTTP %s %s headers=%s", method, url, redact_headers(dict(headers)))
+        response = super().request(*args, **kwargs)
+        body = getattr(response, "text", "") or ""
+        kind = "json"
+        if not body.strip():
+            kind = "empty"
+        elif body.lstrip().startswith("<"):
+            kind = "html"
+        elif body.lstrip().startswith("{"):
+            kind = "json"
+        limit = 2000 if response.status_code >= 400 else 300
+        self.last_status = response.status_code
+        self.last_url = url
+        logger.info("HTTP %s %s -> %s [%s] body=%d chars", method, url, response.status_code, kind, len(body))
+        logger.debug("  body.start: %s", body[:limit].replace("\n", " "))
+        return response
 
 
 def _normalize(text: str) -> str:
@@ -40,17 +77,54 @@ class YoutubeImporter:
         self.client_secrets_path = client_secrets_path
 
         if os.path.exists(token_path):
+            mtime = os.path.getmtime(token_path)
+            age_hours = (time.time() - mtime) / 3600
+            logger.info("credentials file %s exists, size=%d, age=%.1fh", token_path, os.path.getsize(token_path), age_hours)
             with open(token_path, 'r') as f:
                 try:
                     data = json.load(f)
-                except json.JSONDecodeError:
+                except json.JSONDecodeError as e:
+                    logger.error("credentials file %s is not valid JSON: %s", token_path, e)
                     raise ValueError(f"Invalid JSON in {token_path}")
 
             if 'cookie' in data or 'Cookie' in data or 'x-origin' in data:
                 self.auth_type = 'browser'
-                self.ytmusic = YTMusic(token_path)
+                keys = {k.lower(): v for k, v in data.items()}
+                logger.info("detected auth_type=browser; header keys: %s", sorted(redact_headers(data).keys()))
+                if not keys.get('authorization') or not keys.get('cookie'):
+                    logger.error("browser credentials missing required headers: authorization=%s cookie=%s",
+                                 bool(keys.get('authorization')), bool(keys.get('cookie')))
+                    raise ValueError(
+                        "Файл авторизации не содержит обязательных браузерных заголовков "
+                        "(authorization и cookie). Скопируй ВСЕ Request Headers именно "
+                        "POST-запроса browse из DevTools (Network → browse → Request Headers), "
+                        "как описано в README."
+                    )
+                try:
+                    self.ytmusic = YTMusic(token_path, requests_session=LoggingSession())
+                except YTMusicUserError as e:
+                    logger.error("YTMusic rejected browser credentials: %s", e)
+                    raise ValueError(
+                        "Не удалось распознать файл авторизации как браузерный. "
+                        "Скопируй ВСЕ Request Headers именно POST-запроса browse из DevTools, "
+                        "включая authorization (SAPISIDHASH ...) и cookie."
+                    ) from e
+                cookie_value = str(keys.get("cookie") or "")
+                auth_value = str(keys.get("authorization") or "")
+                if "SAPISID" not in cookie_value:
+                    logger.warning(
+                        "browser cookies не содержат SAPISID (%d chars) — похоже на гостевую "
+                        "или неполную сессию. Войди в аккаунт и скопируй headers заново.",
+                        len(cookie_value),
+                    )
+                if not auth_value.startswith("SAPISIDHASH"):
+                    logger.warning(
+                        "authorization не начинается с SAPISIDHASH (%d chars, starts=%r) — "
+                        "сессия может быть невалидной.", len(auth_value), auth_value[:12],
+                    )
             else:
                 self.auth_type = 'oauth'
+                logger.warning("no browser headers (cookie/x-origin) in %s, treating as oauth", token_path)
                 if not client_secrets_path or not os.path.exists(client_secrets_path):
                     raise FileNotFoundError(
                         "OAuth token found but client secrets file required. "
@@ -58,6 +132,7 @@ class YoutubeImporter:
                     )
                 self._init_oauth(token_path, client_secrets_path)
         else:
+            logger.warning("credentials file not found: %s", token_path)
             if client_secrets_path and os.path.exists(client_secrets_path):
                 self.auth_type = 'oauth'
                 self._init_oauth(token_path, client_secrets_path)
@@ -84,6 +159,42 @@ class YoutubeImporter:
                 f.write(token)
 
         self.ytmusic = YTMusic(token_path, oauth_credentials=self.oauth_credentials)
+
+    def verify_auth(self) -> None:
+        """Диагностика: пробный запрос к YouTube Music, ничего не изменяет.
+
+        Логирует результат: ok — авторизация рабочая; ошибка — невалидная
+        сессия (с деталями ответа сервера).
+        """
+        logger.info("verify_auth: probing YTMusic API (get_liked_songs limit=1)...")
+        try:
+            result = self.ytmusic.get_liked_songs(limit=1)
+            tracks = result.get("tracks", []) if result else []
+            logger.info("verify_auth: OK, got %d liked track(s)", len(tracks))
+        except Exception as e:
+            logger.error("verify_auth: FAILED: %s", e)
+            session = getattr(self.ytmusic, "_session", None)
+            status = getattr(session, "last_status", None)
+            if status:
+                logger.error("verify_auth: HTTP status=%s url=%s", status, getattr(session, "last_url", "?"))
+                if status == 400:
+                    logger.error(
+                        "verify_auth: сервер вернул 400 Bad Request — запрос отвергнут. "
+                        "Причины: сессия браузера устарела, заголовки скопированы не целиком "
+                        "или с другого аккаунта/устройства. Переустанови авторизацию заново "
+                        "(меню → Настроить авторизацию YouTube Music), войди в аккаунт свежим "
+                        "и скопируй ВСЕ Request Headers именно POST-запроса browse."
+                    )
+                elif status in (401, 403):
+                    logger.error(
+                        "verify_auth: сервер вернул %s — авторизация недействительна. "
+                        "Сессия истекла или authorization/cookie не совпадают. "
+                        "Переустанови авторизацию заново.", status
+                    )
+            else:
+                logger.error("verify_auth: авторизация не работает — сессия истекла или headers невалидны.")
+                logger.error("verify_auth: переустанови авторизацию: меню → Настроить авторизацию YouTube Music.")
+            raise
 
     def _search_track(self, track: Track, idx: int) -> Tuple[int, Track, Optional[str], Optional[str]]:
         """

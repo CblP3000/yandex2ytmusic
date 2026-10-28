@@ -7,6 +7,9 @@ from .track import Track
 from .playlist import Playlist
 from .podcast import Podcast
 from tqdm import tqdm
+from cli.debug import get_logger
+
+logger = get_logger("yandex")
 
 
 class YandexMusicExporter:
@@ -52,6 +55,7 @@ class YandexMusicExporter:
 
     def export_liked_tracks(self, max_workers: int = 5) -> List[Track]:
         tracks = self.client.users_likes_tracks().tracks
+        logger.info("export_liked_tracks: %d tracks", len(tracks))
 
         result = []
         with tqdm(total=len(tracks), desc='Export tracks') as pbar:
@@ -82,6 +86,7 @@ class YandexMusicExporter:
     def export_liked_podcasts(self, max_workers: int = 5) -> List[Podcast]:
         # Подкасты в Яндекс Музыке записаны как альбомы с типом podcast
         podcasts = [album.album for album in self.client.users_likes_albums() if album.album.type == 'podcast']
+        logger.info("export_liked_podcasts: %d podcasts", len(podcasts))
 
         result = []
         with tqdm(total=len(podcasts), desc='Export podcasts') as pbar:
@@ -120,6 +125,7 @@ class YandexMusicExporter:
 
     def export_playlists(self, playlists: List[Playlist], max_workers: int = 5) -> List[Playlist]:
         """Экспорт конкретных плейлистов (метаданные + треки)."""
+        logger.info("export_playlists: %d playlists", len(playlists))
         result = []
         with tqdm(total=len(playlists), desc='Export playlists') as pbar:
             with ThreadPoolExecutor(max_workers=max_workers) as executor:
@@ -136,6 +142,7 @@ class YandexMusicExporter:
                         pbar.set_postfix_str(f'{playlist_result.title}'[:40])
                     except Exception as e:
                         pbar.write(f'Error processing playlist: {e}')
+                        logger.error("error processing playlist %s: %s", getattr(playlist, "title", "?"), e)
                         results_dict[idx] = None
                     pbar.update(1)
 
