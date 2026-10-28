@@ -10,28 +10,23 @@ Transfer liked tracks, playlists and podcasts from Yandex.Music to YouTube Music
 
 ## What's New
 
-| Feature | Original | This Version |
-|---------|----------|--------------|
-| Interactive menu | No (CLI flags only) | Yes |
-| Separate export/import | No | Yes |
-| Automatic YouTube auth | No | Yes (via Playwright) |
-| Browser authentication | No | Yes |
-| Multithreading | No | Yes (up to 5x faster) |
-| Import mode selection | No | Fast / Preserve order |
-| Progress saving between steps | No | Yes |
+| Feature | Original | This Fork |
+|---------|----------|-----------|
+| Menu | Basic menu (single-select only) | Standardized menu system with multi-select screens |
+| Export | Exports everything | Choose: likes / podcasts / own and liked playlists |
+| YouTube authorization | Browser authentication | + OAuth via Google |
+| Authorization reliability | No | Header sanitization, verify_auth, stale creds warning |
+| TLS retries | No | Yes |
+| Debug logs | No | Yes (`DEBUG=1`) |
 
-### Key Improvements
+### Key Improvements (Made in This Fork)
 
-- **Interactive menu** — a single standardized menu system (`cli/menu.py`) with single and multi-select screens; no need to remember command-line flags
-- **Separate export/import** — export data from Yandex first, then import to YouTube separately (solves session timeout issues with large libraries)
+- **Standardized interactive menu** — the menu system was rewritten: unified single and multi-select screens (`cli/menu.py`, `cli/ui.py`) with common hotkeys (↑/↓, numbers + Enter, Space/a/n in multi-select), demo via `python -m cli.demo`
 - **Selective export** — you choose what to transfer: liked tracks, podcasts, your playlists and liked playlists (with multi-select of specific playlists)
-- **Three YouTube authorization methods** — automatically from the browser (Playwright), manually via DevTools, or OAuth via Google
-- **Browser authentication** — more stable than OAuth, doesn't require creating a Google Cloud project
-- **Authorization check before import** — captured headers are sanitized (`sanitize_browser_headers`), authorization is verified before importing (`verify_auth`), warning for a stale `browser.json`
-- **Network failure resilience** — retries with exponential backoff during Yandex export, TLS failure retries during import, re-liking tracks that YouTube dropped without an error
-- **Multithreading** — parallel track processing speeds up export and import up to 5x
-- **Import mode selection** — fast parallel mode or order-preserving mode
-- **Debug logs** — detailed diagnostics via `DEBUG=1` (LoggingSession, verify_auth, browser request capture); secret values (`cookie`, `authorization`) are never logged in full
+- **OAuth authorization via Google** — an alternative authorization method for cases when browser authentication doesn't work
+- **Authorization reliability** — captured headers are sanitized (`sanitize_browser_headers`), authorization is verified before importing (`verify_auth`), warning for a stale `browser.json`
+- **Resilience to TLS failures during import** — automatic retries of failed requests, plus fixes: taking the first search result, correctly creating playlists with empty descriptions
+- **Debug logs** — detailed diagnostics via `DEBUG=1` (LoggingSession, authorization checks, browser request capture); secret values (`cookie`, `authorization`) are never logged in full
 
 ## Installation
 
