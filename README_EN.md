@@ -6,6 +6,8 @@ Transfer liked tracks, playlists and podcasts from Yandex.Music to YouTube Music
 
 **Fork of [gosha20777/yandex2ytmusic](https://github.com/gosha20777/yandex2ytmusic) with improvements.**
 
+> ⚠️ All changes in this version were made with AI assistance.
+
 ## What's New
 
 | Feature | Original | This Version |
