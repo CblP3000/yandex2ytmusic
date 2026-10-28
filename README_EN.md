@@ -22,12 +22,16 @@ Transfer liked tracks, playlists and podcasts from Yandex.Music to YouTube Music
 
 ### Key Improvements
 
-- **Interactive menu** — no need to remember command-line flags
-- **Separate export/import** — export tracks, playlists and podcasts from Yandex first, then import to YouTube separately (solves session timeout issues with large libraries)
-- **Automatic authorization** — the program opens a browser and captures authentication data automatically
+- **Interactive menu** — a single standardized menu system (`cli/menu.py`) with single and multi-select screens; no need to remember command-line flags
+- **Separate export/import** — export data from Yandex first, then import to YouTube separately (solves session timeout issues with large libraries)
+- **Selective export** — you choose what to transfer: liked tracks, podcasts, your playlists and liked playlists (with multi-select of specific playlists)
+- **Three YouTube authorization methods** — automatically from the browser (Playwright), manually via DevTools, or OAuth via Google
+- **Browser authentication** — more stable than OAuth, doesn't require creating a Google Cloud project
+- **Authorization check before import** — captured headers are sanitized (`sanitize_browser_headers`), authorization is verified before importing (`verify_auth`), warning for a stale `browser.json`
+- **Network failure resilience** — retries with exponential backoff during Yandex export, TLS failure retries during import, re-liking tracks that YouTube dropped without an error
 - **Multithreading** — parallel track processing speeds up export and import up to 5x
 - **Import mode selection** — fast parallel mode or order-preserving mode
-- **Browser authentication** — more stable than OAuth, doesn't require creating a Google Cloud project
+- **Debug logs** — detailed diagnostics via `DEBUG=1` (LoggingSession, verify_auth, browser request capture); secret values (`cookie`, `authorization`) are never logged in full
 
 ## Installation
 
